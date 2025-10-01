@@ -1,138 +1,102 @@
-"""Streamlit application for RFP and SOW analysis using Google Gemini models."""
-
-from __future__ import annotations
-
-import json
-from io import BytesIO
-from typing import Dict, Iterable, List, Tuple
-
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import fitz  # PyMuPDF
+from io import BytesIO
 from google import genai
-import fitz
+import json
 
-# ---------------------------------------------------------------------------
-# Page configuration and sidebar controls
-# ---------------------------------------------------------------------------
-
-st.set_page_config(page_title="RFP Analysis Tool", page_icon="📄", layout="wide")
-
-st.title("📄 RFP & SOW Analysis Automation Tool")
-st.write(
-    "Upload government tender PDFs (RFP or SOW documents) to automatically "
-    "extract key information."
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="RFP Analysis Tool",
+    page_icon="📄",
+    layout="wide"
 )
 
+st.title("📄 RFP & SOW Analysis Automation Tool")
+st.write("Upload government tender PDFs (RFP or SOW documents) to automatically extract key information.")
+
+# --- API Key Configuration ---
 with st.sidebar:
     st.header("⚙️ Configuration")
     api_key = st.text_input("Enter your Google Gemini API Key", type="password")
-    st.caption(
-        "Don't have a key? [Get one from Google AI Studio](https://aistudio.google.com/)"
-    )
-
+    st.caption("Don't have a key? [Get one from Google AI Studio](https://aistudio.google.com/)")
+    
     st.divider()
-
+    
     st.subheader("Model Selection")
     model_choice = st.radio(
         "Choose AI Model:",
-        ("gemini-2.5-flash (Faster)", "gemini-2.5-pro (More Accurate)"),
-        help="Flash is faster but Pro gives better extraction quality",
+        ["gemini-2.5-flash (Faster)", "gemini-2.5-pro (More Accurate)"],
+        help="Flash is faster but Pro gives better extraction quality"
     )
-    SELECTED_MODEL = "gemini-2.5-flash" if "flash" in model_choice else "gemini-2.5-pro"
-
+    selected_model = "gemini-2.5-flash" if "flash" in model_choice else "gemini-2.5-pro"
+    
     st.divider()
-
+    
     st.subheader("📋 Extracted Fields")
     with st.expander("RFP Fields"):
-        st.markdown(
-            """
-            - Bid Number & Dates
-            - Ministry/Department/Office
-            - Estimated Value & Contract Period
-            - Turnover & Experience Requirements
-            - MSE/Startup Exemptions
-            - Scope of Work Summary
-            - Go/No-Go Eligibility Summary
-            - Linked Document URLs
-            """
-        )
-
+        st.markdown("""
+        - Bid Number & Dates
+        - Ministry/Department/Office
+        - Estimated Value & Contract Period
+        - Turnover & Experience Requirements
+        - MSE/Startup Exemptions
+        - Scope of Work Summary
+        - Go/No-Go Eligibility Summary
+        - Linked Document URLs
+        """)
+    
     with st.expander("SOW Fields"):
-        st.markdown(
-            """
-            - Technical Requirements
-            - Deliverables & Timeline
-            - Performance Metrics
-            - Quality Standards
-            - Implementation Methodology
-            - Support & Maintenance
-            """
-        )
+        st.markdown("""
+        - Technical Requirements
+        - Deliverables & Timeline
+        - Performance Metrics
+        - Quality Standards
+        - Implementation Methodology
+        - Support & Maintenance
+        """)
 
-# ---------------------------------------------------------------------------
-# Helper utilities
-# ---------------------------------------------------------------------------
+# --- Core Functions ---
 
-MAX_CHARS = 60000
-
-
-@st.cache_resource(show_spinner=False)
-def get_client(api_key_value: str) -> genai.Client | None:
-    """Return a cached Gemini client instance for the provided API key."""
-    if not api_key_value:
-        return None
-    try:
-        return genai.Client(api_key=api_key_value)
-    except Exception as exc:  # pragma: no cover - protective UI feedback
-        st.error(f"Failed to initialise Gemini client: {exc}")
-        return None
-
-
-def chunk_text(text: str, *, chunk_size: int = MAX_CHARS, overlap: int = 500) -> List[str]:
-    """Split long text into overlapping chunks suitable for model ingestion."""
-    if len(text) <= chunk_size:
-        return [text]
-
-    chunks: List[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        chunks.append(text[start:end])
-        if end == len(text):
-            break
-        start = max(0, end - overlap)
-    return chunks
-
-
-def extract_text_and_urls_from_pdf(pdf_file) -> Tuple[str | None, List[str]]:
-    """Extract text content and hyperlinks from a PDF file."""
+def extract_text_and_urls_from_pdf(pdf_file):
+    """Extract text content and hyperlinks from PDF"""
     try:
         pdf_bytes = pdf_file.read()
-        document = fitz.open(stream=pdf_bytes, filetype="pdf")
-        text = "".join(page.get_text() for page in document)
-
-        urls: List[str] = []
-        for page in document:
-            for link in page.get_links():
-                uri = link.get("uri")
-                if uri and uri.startswith(("http://", "https://")) and uri not in urls:
-                    urls.append(uri)
-
-        document.close()
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        # Extract text
+        text = ""
+        for page in pdf_document:
+            text += page.get_text()
+        
+        # Extract URLs
+        urls = []
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+            links = page.get_links()
+            for link in links:
+                if 'uri' in link:
+                    uri = link['uri']
+                    if uri and (uri.startswith('http://') or uri.startswith('https://')):
+                        if uri not in urls:
+                            urls.append(uri)
+        
+        pdf_document.close()
         return text, urls
-    except Exception as exc:
-        st.error(f"Error reading PDF {pdf_file.name}: {exc}")
+    except Exception as e:
+        st.error(f"Error reading PDF {pdf_file.name}: {e}")
         return None, []
 
-
-def _build_rfp_prompt(text: str, filename: str, urls: Iterable[str]) -> str:
+def extract_rfp_data(text_content, filename, urls):
+    """Extract RFP data using AI"""
     urls_string = "; ".join(urls) if urls else "No linked documents found"
-    return f"""
+    
+    prompt = f"""
 You are an expert Government Tender Analyst. Extract data from this GeM tender document into a JSON object.
 
 Tender Document: {filename}
 ---
-{text}
+{text_content[:50000]}
 ---
 
 **Instructions:**
@@ -164,21 +128,39 @@ Tender Document: {filename}
 
 Return ONLY valid JSON without markdown formatting.
 """
+    
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=selected_model,
+            contents=prompt
+        )
+        
+        # Parse JSON response
+        json_string = response.text.strip().replace('```json', '').replace('```', '').strip()
+        data = json.loads(json_string)
+        return data
+    except json.JSONDecodeError as e:
+        st.error(f"Failed to parse AI response as JSON: {e}")
+        return None
+    except Exception as e:
+        st.error(f"AI Error: {e}")
+        return None
 
-
-def _build_sow_prompt(text: str, filename: str) -> str:
-    return f"""
+def extract_sow_data(text_content, filename):
+    """Extract SOW data using AI"""
+    prompt = f"""
 You are an expert Government Tender Analyst. Extract SOW data from this document into a JSON object.
 
 Document: {filename}
 ---
-{text}
+{text_content[:50000]}
 ---
 
 **Instructions:**
-1. Extract all technical and operational details.
-2. Use "Not Found" if information is missing.
-3. Provide comprehensive summaries for complex fields.
+1. Extract all technical and operational details
+2. Use "Not Found" if information is missing
+3. Provide comprehensive summaries for complex fields
 
 **JSON Schema (use these exact keys):**
 {{
@@ -200,171 +182,115 @@ Document: {filename}
 
 Return ONLY valid JSON without markdown formatting.
 """
-
-
-def call_gemini_json(prompt: str, *, client: genai.Client) -> Dict[str, str] | None:
-    """Invoke the Gemini model and coerce the response into JSON."""
+    
     try:
+        client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model=SELECTED_MODEL,
-            contents=prompt,
-            generation_config={"response_mime_type": "application/json"},
+            model=selected_model,
+            contents=prompt
         )
-        return json.loads(response.text)
-    except json.JSONDecodeError as exc:
-        st.error(f"Failed to parse AI response as JSON: {exc}")
+        
+        json_string = response.text.strip().replace('```json', '').replace('```', '').strip()
+        data = json.loads(json_string)
+        data["Document_Type"] = "SOW"
+        return data
+    except json.JSONDecodeError as e:
+        st.error(f"Failed to parse AI response as JSON: {e}")
         return None
-    except Exception as exc:
-        st.error(f"AI Error: {exc}")
+    except Exception as e:
+        st.error(f"AI Error: {e}")
         return None
 
-
-def extract_rfp_data(text: str, filename: str, urls: Iterable[str], *, client: genai.Client):
-    prompt = _build_rfp_prompt(text, filename, urls)
-    return call_gemini_json(prompt, client=client)
-
-
-def extract_sow_data(text: str, filename: str, *, client: genai.Client):
-    prompt = _build_sow_prompt(text, filename)
-    data = call_gemini_json(prompt, client=client)
-    if data is not None:
-        data.setdefault("Document_Type", "SOW")
-    return data
-
-
-# ---------------------------------------------------------------------------
-# Main UI logic
-# ---------------------------------------------------------------------------
+# --- Main UI ---
 
 uploaded_files = st.file_uploader(
-    "📁 Choose PDF files",
-    type="pdf",
+    "📁 Choose PDF files", 
+    type="pdf", 
     accept_multiple_files=True,
-    help="Upload one or more RFP or SOW documents",
+    help="Upload one or more RFP or SOW documents"
 )
 
 if uploaded_files:
     st.subheader("Document Type Selection")
     st.caption("Select the document type for each uploaded file")
-
-    document_types: Dict[str, str] = {}
-    columns = st.columns(min(len(uploaded_files), 3))
-    for index, file in enumerate(uploaded_files):
-        with columns[index % len(columns)]:
-            document_types[file.name] = st.radio(
-                label=file.name,
-                options=("RFP", "SOW"),
-                key=f"doc_type_{index}",
-                horizontal=True,
+    
+    doc_types = {}
+    cols = st.columns(min(len(uploaded_files), 3))
+    
+    for idx, file in enumerate(uploaded_files):
+        with cols[idx % 3]:
+            doc_types[file.name] = st.radio(
+                file.name,
+                options=["RFP", "SOW"],
+                key=f"type_{idx}",
+                horizontal=True
             )
-else:
-    document_types = {}
 
-analyze_disabled = not uploaded_files
-
-if st.button("🚀 Analyze Documents", type="primary", disabled=analyze_disabled):
+if st.button("🚀 Analyze Documents", type="primary", disabled=not uploaded_files):
     if not api_key:
         st.warning("⚠️ Please enter your Gemini API Key in the sidebar to proceed.")
     elif not uploaded_files:
         st.warning("⚠️ Please upload at least one PDF file.")
     else:
-        client = get_client(api_key)
-        if client is None:
-            st.stop()
-
-        rfp_results: List[Dict[str, str]] = []
-        sow_results: List[Dict[str, str]] = []
-
+        rfp_results = []
+        sow_results = []
+        
         progress_bar = st.progress(0)
-        status_placeholder = st.empty()
-
-        for index, pdf in enumerate(uploaded_files, start=1):
-            status_placeholder.info(f"📄 Processing: **{pdf.name}** ({index}/{len(uploaded_files)})")
-
-            text, urls = extract_text_and_urls_from_pdf(pdf)
-            if not text:
-                continue
-
-            # Break long documents into manageable chunks for better reliability
-            chunks = chunk_text(text)
-            combined_text = "\n\n".join(chunks)
-
-            doc_type = document_types.get(pdf.name, "RFP")
-            if doc_type == "RFP":
-                result = extract_rfp_data(combined_text, pdf.name, urls, client=client)
-                if result:
-                    rfp_results.append(result)
-                    st.success(f"✅ Successfully analyzed {pdf.name} (RFP)")
-            else:
-                result = extract_sow_data(combined_text, pdf.name, client=client)
-                if result:
-                    sow_results.append(result)
-                    st.success(f"✅ Successfully analyzed {pdf.name} (SOW)")
-
-            progress_bar.progress(index / len(uploaded_files))
-
-        status_placeholder.success("✨ Analysis Complete!")
-
-        if not (rfp_results or sow_results):
+        status_text = st.empty()
+        
+        for idx, pdf_file in enumerate(uploaded_files):
+            status_text.info(f"📄 Processing: **{pdf_file.name}** ({idx+1}/{len(uploaded_files)})")
+            
+            text, urls = extract_text_and_urls_from_pdf(pdf_file)
+            
+            if text:
+                doc_type = doc_types[pdf_file.name]
+                
+                if doc_type == "RFP":
+                    data = extract_rfp_data(text, pdf_file.name, urls)
+                    if data:
+                        rfp_results.append(data)
+                        st.success(f"✅ Successfully analyzed {pdf_file.name} (RFP)")
+                else:  # SOW
+                    data = extract_sow_data(text, pdf_file.name)
+                    if data:
+                        sow_results.append(data)
+                        st.success(f"✅ Successfully analyzed {pdf_file.name} (SOW)")
+            
+            progress_bar.progress((idx + 1) / len(uploaded_files))
+        
+        status_text.success("✨ Analysis Complete!")
+        
+        # Display Results
+        if rfp_results or sow_results:
+            st.divider()
+            st.header("📊 Analysis Results")
+            
+            # Create Excel file
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                if rfp_results:
+                    df_rfp = pd.DataFrame(rfp_results)
+                    df_rfp.to_excel(writer, index=False, sheet_name='RFP_Data')
+                    
+                    st.subheader("RFP Documents")
+                    st.dataframe(df_rfp, use_container_width=True)
+                
+                if sow_results:
+                    df_sow = pd.DataFrame(sow_results)
+                    df_sow.to_excel(writer, index=False, sheet_name='SOW_Data')
+                    
+                    st.subheader("SOW Documents")
+                    st.dataframe(df_sow, use_container_width=True)
+            
+            excel_data = output.getvalue()
+            
+            st.download_button(
+                label="📥 Download Complete Analysis as Excel",
+                data=excel_data,
+                file_name="rfp_sow_analysis_results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
+        else:
             st.error("❌ No data was successfully extracted. Please check your documents and try again.")
-            st.stop()
-
-        st.divider()
-        st.header("📊 Analysis Results")
-
-        output_buffer = BytesIO()
-        json_payload: Dict[str, List[Dict[str, str]]] = {}
-
-        with pd.ExcelWriter(output_buffer, engine="openpyxl") as writer:
-            if rfp_results:
-                df_rfp = pd.DataFrame(rfp_results)
-                df_rfp.to_excel(writer, index=False, sheet_name="RFP_Data")
-                json_payload["rfp"] = rfp_results
-
-                st.subheader("RFP Documents")
-                st.dataframe(df_rfp, use_container_width=True)
-
-                if "Bid_End_Date" in df_rfp:
-                    st.markdown("### 🗓️ Upcoming Bid Deadlines")
-                    try:
-                        deadline_series = pd.to_datetime(df_rfp["Bid_End_Date"], errors="coerce")
-                        upcoming = (
-                            df_rfp.assign(_deadline=deadline_series)
-                            .dropna(subset=["_deadline"])
-                            .sort_values("_deadline")
-                            .head(5)
-                        )
-                        if not upcoming.empty:
-                            st.dataframe(
-                                upcoming[["File_Name", "Bid_Number", "Bid_End_Date", "Go_NoGo_Eligibility_Summary"]],
-                                use_container_width=True,
-                            )
-                        else:
-                            st.info("No valid bid deadlines were detected in the extracted data.")
-                    except Exception as exc:  # pragma: no cover
-                        st.warning(f"Unable to generate bid deadline summary: {exc}")
-
-            if sow_results:
-                df_sow = pd.DataFrame(sow_results)
-                df_sow.to_excel(writer, index=False, sheet_name="SOW_Data")
-                json_payload["sow"] = sow_results
-
-                st.subheader("SOW Documents")
-                st.dataframe(df_sow, use_container_width=True)
-
-        excel_data = output_buffer.getvalue()
-
-        st.download_button(
-            label="📥 Download Complete Analysis as Excel",
-            data=excel_data,
-            file_name="rfp_sow_analysis_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
-
-        st.download_button(
-            label="📤 Download Raw JSON",
-            data=json.dumps(json_payload, indent=2),
-            file_name="rfp_sow_analysis_results.json",
-            mime="application/json",
-        )
