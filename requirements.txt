@@ -1,5 +1,7 @@
-streamlit
-pymupdf
-pandas
-openpyxl
 google-genai
+openpyxl
+pandas
+pymupdf
+python-docx
+requests
+streamlit
