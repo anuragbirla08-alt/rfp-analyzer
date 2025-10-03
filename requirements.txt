@@ -3,3 +3,5 @@ pymupdf
 pandas
 openpyxl
 google-genai
+requests
+python-docx
