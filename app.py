@@ -22,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📄 RFP Analysis Automation Tool")
+st.title("📄 RFP Analysis Tool")
 st.write(
     "Upload one or more government tender PDFs to automatically extract key information "
     "and manage any supporting Scope of Work (SOW) documents."
@@ -693,3 +693,4 @@ if analysis_results:
     )
 else:
     st.info("Upload an RFP and run the analysis to see results here.")
+
